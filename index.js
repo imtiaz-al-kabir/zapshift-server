@@ -1,6 +1,9 @@
 import cors from "cors";
+import dotenv from "dotenv";
+import "dotenv/config";
 import express from "express";
 import { MongoClient, ServerApiVersion } from "mongodb";
+dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -15,8 +18,7 @@ app.listen(port, () => {
   console.log(`zapShift app listening on port ${port}`);
 });
 
-const uri =
-  "mongodb+srv://zapShift:Fn8YrrXygPxqqXYy@projects.khlwhkd.mongodb.net/?appName=projects";
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@projects.khlwhkd.mongodb.net/?appName=projects`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -36,7 +38,16 @@ async function run() {
 
     // parcel api
 
-    app.get("/parcels", async (req, res) => {});
+    app.get("/parcels", async (req, res) => {
+      const query = {};
+      const { email } = req.query;
+      if (email) {
+        query.senderEmail = email;
+      }
+      const cursor = parcelsCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
       const result = await parcelsCollection.insertOne(parcel);
