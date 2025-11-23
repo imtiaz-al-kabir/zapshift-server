@@ -206,7 +206,7 @@ async function run() {
         query.customer_email = email;
 
         if(email !== req.decoded_email){
-          return res.status(403).send({message:"forbidden Access"})
+          return res.status(403).send({message:"Forbidden Access"})
         }
       }
       const cursor = paymentCollection.find(query);
