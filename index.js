@@ -2,13 +2,52 @@ import cors from "cors";
 import dotenv from "dotenv";
 import "dotenv/config";
 import express from "express";
-import { MongoClient, ServerApiVersion } from "mongodb";
+import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
+import { nanoid } from "nanoid";
+import Stripe from "stripe";
+const stripe = new Stripe(process.env.STRIPE_SECRET);
 dotenv.config();
+
+import admin from "firebase-admin";
+
+import serviceAccount from "./zapshift-adminsdk.json" with { type: 'json' };
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 const app = express();
 const port = process.env.PORT || 3000;
 
+export const generateTrackingId = () => {
+  const id = nanoid(10).toUpperCase(); // random 10-char unique ID
+  return `TRK-${id}`;
+};
 app.use(express.json());
 app.use(cors());
+
+const verifyFBToken = async (req, res, next) => {
+  const token = req.headers.authorization;
+
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+
+  try {
+    
+    const idToken=token.split(" ")[1]
+    const decoded= await admin.auth().verifyIdToken(idToken)  
+  
+   req.decoded_email=decoded.email
+    console.log("decoded in the token",decoded)
+
+    next()
+  } 
+    
+    catch (error) {
+    return res.status(401).send({message:"unauthorized access"})
+  }
+};
 
 app.get("/", (req, res) => {
   res.send("zap shift is running");
@@ -35,6 +74,7 @@ async function run() {
     await client.connect();
     const db = client.db("zap_shift_db");
     const parcelsCollection = db.collection("parcels");
+    const paymentCollection = db.collection("payments");
 
     // parcel api
 
@@ -44,13 +84,133 @@ async function run() {
       if (email) {
         query.senderEmail = email;
       }
-      const cursor = parcelsCollection.find(query);
+      const options = { sort: { createdAt: -1 } };
+      const cursor = parcelsCollection.find(query, options);
       const result = await cursor.toArray();
+      res.send(result);
+    });
+    app.get("/parcels/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      console.log(query);
+      const result = await parcelsCollection.findOne(query);
       res.send(result);
     });
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
+      parcel.createdAt = new Date();
       const result = await parcelsCollection.insertOne(parcel);
+      res.send(result);
+    });
+
+    app.delete("/parcels/:id", async (req, res) => {
+      const id = req.params.id;
+      console.log(id);
+      const query = { _id: new ObjectId(id) };
+      console.log(query);
+      const result = await parcelsCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // payment related apis
+
+    app.post("/create-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      const amount = parseInt(paymentInfo.cost) * 100;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "USD",
+              unit_amount: amount,
+              product_data: {
+                name: paymentInfo.parcelName,
+              },
+            },
+
+            quantity: 1,
+          },
+        ],
+        customer_email: paymentInfo.senderEmail,
+        mode: "payment",
+        metadata: {
+          parcelId: paymentInfo.parcelId,
+          parcelName: paymentInfo.parcelName,
+        },
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+      });
+
+      // res.redirect(303, session.url);
+      res.send({ url: session.url });
+    });
+
+    app.patch("/payment-success", async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      const transactionId = session.payment_intent;
+      const query = { transactionId: transactionId };
+      const paymentExist = await paymentCollection.findOne(query);
+      if (paymentExist) {
+        return res.send({
+          message: "already exist",
+          transactionId,
+          trackingId: paymentExist.trackingId,
+        });
+      }
+
+      const trackingId = generateTrackingId();
+      if (session.payment_status === "paid") {
+        const id = session.metadata.parcelId;
+        const query = { _id: new ObjectId(id) };
+        const update = {
+          $set: {
+            paymentStatus: "paid",
+            trackingId: trackingId,
+          },
+        };
+
+        const result = parcelsCollection.updateOne(query, update);
+
+        const payment = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          customer_email: session.customer_email,
+          parcelId: session.metadata.parcelId,
+          parcelName: session.metadata.parcelName,
+          transactionId: session.payment_intent,
+          paymentStatus: session.payment_status,
+          paidAt: new Date(),
+          trackingId: trackingId,
+        };
+        if (session.payment_status === "paid") {
+          const resultPayment = await paymentCollection.insertOne(payment);
+          res.send({
+            success: true,
+            paymentInfo: resultPayment,
+            modifyParcel: result,
+            trackingId: trackingId,
+            transactionId: session.payment_intent,
+          });
+        }
+
+        res.send(result);
+      }
+    });
+
+    app.get("/payments",verifyFBToken, async (req, res) => {
+      const email = req.query.email;
+      const query = {};
+
+      if (email) {
+        query.customer_email = email;
+
+        if(email !== req.decoded_email){
+          return res.status(403).send({message:"forbidden Access"})
+        }
+      }
+      const cursor = paymentCollection.find(query);
+      const result = await cursor.toArray();
       res.send(result);
     });
 
