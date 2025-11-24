@@ -1,3 +1,5 @@
-.env
+
 zapshift-adminsdk.json
 node_modules
+
+.env

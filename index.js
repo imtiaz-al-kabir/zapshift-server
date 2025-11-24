@@ -11,20 +11,19 @@ dotenv.config();
 import admin from "firebase-admin";
 
 import serviceAccount from "./zapshift-adminsdk.json" with { type: 'json' };
+const app = express();
+const port = process.env.PORT || 3000;
+app.use(express.json());
+app.use(cors());
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-const app = express();
-const port = process.env.PORT || 3000;
-
 export const generateTrackingId = () => {
   const id = nanoid(10).toUpperCase(); // random 10-char unique ID
   return `TRK-${id}`;
 };
-app.use(express.json());
-app.use(cors());
 
 const verifyFBToken = async (req, res, next) => {
   const token = req.headers.authorization;
@@ -34,18 +33,15 @@ const verifyFBToken = async (req, res, next) => {
   }
 
   try {
-    
-    const idToken=token.split(" ")[1]
-    const decoded= await admin.auth().verifyIdToken(idToken)  
-  
-   req.decoded_email=decoded.email
-    console.log("decoded in the token",decoded)
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
 
-    next()
-  } 
-    
-    catch (error) {
-    return res.status(401).send({message:"unauthorized access"})
+    req.decoded_email = decoded.email;
+    console.log("decoded in the token", decoded);
+
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "unauthorized access" });
   }
 };
 
@@ -75,6 +71,73 @@ async function run() {
     const db = client.db("zap_shift_db");
     const parcelsCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
+    const usersCollection = db.collection("users");
+    const ridersCollection = db.collection("riders");
+
+    // user api
+
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.role = "user";
+      user.createdAt = new Date();
+      const email = user.email;
+      const useExists = await usersCollection.findOne({ email });
+      if (useExists) {
+        return res.send({ message: "user exist" });
+      }
+      const result = await usersCollection.insertOne(user);
+      res.send(result);
+    });
+
+    // rider api
+    app.get("/riders", async (req, res) => {
+      const query = {};
+      if (req.query.status) {
+        query.status = req.query.status;
+      }
+      const cursor = ridersCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.post("/riders", async (req, res) => {
+      const rider = req.body;
+      rider.status = "pending";
+      rider.createdAt = new Date();
+      const result = await ridersCollection.insertOne(rider);
+      res.send(result);
+    });
+    app.patch("/riders/:id", verifyFBToken, async (req, res) => {
+      const id = req.params.id;
+      const status = req.body.status;
+      const query = { _id: new ObjectId(id) };
+      const updatedRiderStatus = {
+        $set: {
+          status: status,
+        },
+      };
+      const result = await ridersCollection.updateOne(
+        query,
+        updatedRiderStatus
+      );
+
+      if(status==="approved"){
+
+const email=req.body.email
+const userQuery={email}
+
+const updateUser={
+  $set:{
+    role:"rider"
+  }
+}
+
+const userResult=await usersCollection.updateOne(userQuery,updateUser)
+
+
+      }
+      res.send(result);
+    });
 
     // parcel api
 
@@ -198,18 +261,18 @@ async function run() {
       }
     });
 
-    app.get("/payments",verifyFBToken, async (req, res) => {
+    app.get("/payments", verifyFBToken, async (req, res) => {
       const email = req.query.email;
       const query = {};
 
       if (email) {
         query.customer_email = email;
 
-        if(email !== req.decoded_email){
-          return res.status(403).send({message:"Forbidden Access"})
+        if (email !== req.decoded_email) {
+          return res.status(403).send({ message: "Forbidden Access" });
         }
       }
-      const cursor = paymentCollection.find(query);
+      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
       const result = await cursor.toArray();
       res.send(result);
     });
